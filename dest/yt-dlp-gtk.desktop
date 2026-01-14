@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Загрузчик с You Tube
+Exec=/usr/bin/yt-dlp-gtk
+Icon=video-x-generic
+Type=Application
+Categories=Network;Video;
+Terminal=false

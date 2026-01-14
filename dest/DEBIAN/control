@@ -1,0 +1,8 @@
+Package: yt-dlp-gtk
+Version: 0.7.1
+Section: utils
+Priority: optional
+Architecture: all
+Maintainer: Alexey Shtokalo <alexey@shtokalo.net>
+Depends: python3, python3-gi, gir1.2-gtk-3.0, yt-dlp, ffmpeg
+Description: Простая программа для скачивания видео и аудио с You Tube основанная на yt-dlp.
