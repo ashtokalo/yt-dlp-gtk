@@ -32,7 +32,7 @@ You can install them via terminal:
 
 ### Download pre-built package
 
-You can download the ready-to-use [.deb package](deb) with latest version and install using:
+You can download the ready-to-use [.deb package][deb] with latest version and install using:
 
     sudo apt install ./yt-dlp-gtk_0.7.1_all.deb
 
