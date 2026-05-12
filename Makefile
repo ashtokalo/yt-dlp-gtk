@@ -1,6 +1,6 @@
 # Переменные
 PKG_NAME=yt-dlp-gtk
-VERSION=0.7.1
+VERSION=0.2.0
 BUILD_DIR=build
 
 all:

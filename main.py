@@ -4,8 +4,8 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import threading
+import yt_dlp
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -13,7 +13,7 @@ gi.require_version('Gdk', '3.0')
 from gi.repository import Gtk, GLib, Gio, Gdk
 
 APP_NAME = "yt-dlp-gtk"
-VERSION = "0.7.1"
+VERSION = "0.2.0"
 CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 HISTORY_FILE = os.path.join(CONFIG_DIR, "history.json")
@@ -23,12 +23,13 @@ class App():
 
     def __init__(self):
         self.process = None
+        self.stop_download = False
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
 
         # Загружаем настройки приложения
         if not os.path.exists(CONFIG_DIR):
             os.makedirs(CONFIG_DIR)
-        self.settings = {"download_path": DEFAULT_DOWNLOADS, "proxy": "", "last_quality": "720"}
+        self.settings = {"download_path": DEFAULT_DOWNLOADS, "proxy": "", "use_proxy": False, "last_quality": "720"}
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, 'r') as f:
@@ -160,11 +161,6 @@ class App():
         self.settings["last_quality"] = combo.get_active_id()
         self.save_settings()
 
-    def on_cancel_clicked(self, widget):
-        if self.process:
-            self.process.terminate()
-            self.process = None
-
     def on_download_clicked(self, widget):
         if not self.btn_download.get_sensitive(): return
         url = self.entry_url.get_text()
@@ -192,10 +188,29 @@ class App():
         btn_b.connect("clicked", self.on_browse_clicked, en)
         h1.pack_start(btn_b, 0, 0, 0)
         v.pack_start(h1, 0, 0, 0)
-        v.pack_start(Gtk.Label(label="Прокси (например, socks5://user:pass@host:port):", xalign=0), 0, 0, 0)
-        pe = Gtk.Entry(text=self.settings['proxy'])
+        v.pack_start(Gtk.Label(label="Подключение:", xalign=0), 0, 0, 0)
+        rb_direct = Gtk.RadioButton.new_with_label(None, "Без прокси")
+        rb_proxy = Gtk.RadioButton.new_with_label_from_widget(rb_direct, "Через прокси")
+        v.pack_start(rb_direct, 0, 0, 0)
+        v.pack_start(rb_proxy, 0, 0, 0)
+
+        pe = Gtk.Entry(text=self.settings['proxy'], placeholder_text="socks5://user:pass@host:port")
         pe.connect("changed", lambda e: self.update_setting('proxy', e.get_text()))
         v.pack_start(pe, 0, 0, 0)
+
+        if self.settings.get('use_proxy'):
+            rb_proxy.set_active(True)
+        else:
+            rb_direct.set_active(True)
+            pe.set_sensitive(False)
+
+        def on_proxy_toggled(widget):
+            use = rb_proxy.get_active()
+            pe.set_sensitive(use)
+            self.update_setting('use_proxy', use)
+
+        rb_direct.connect("toggled", on_proxy_toggled)
+        rb_proxy.connect("toggled", on_proxy_toggled)
         win.show_all()
 
     def update_setting(self, k, v):
@@ -265,45 +280,78 @@ class App():
         about.run()
         about.destroy()
 
-    def download(self, url, path, quality):
-        proxy = self.settings.get('proxy')
+    def progress_hook(self, d):
+        """Обработчик прогресса с проверкой флага остановки"""
+        # Если флаг установлен, выбрасываем исключение для прерывания yt-dlp
+        if self.stop_download:
+            raise Exception("DOWNLOAD_CANCELLED_BY_USER")
+
+        if d['status'] == 'downloading':
+            p = d.get('_percent_str', '0%')
+            try:
+                percent_val = float(p.replace('%', '').strip()) / 100.0
+                GLib.idle_add(self.progress_bar.set_fraction, percent_val)
+            except ValueError:
+                pass
+        elif d['status'] == 'finished':
+            GLib.idle_add(self.progress_bar.set_fraction, 1.0)
+
+    def download(self, url, path, q):
+        self.stop_download = False  # Сбрасываем флаг перед началом
         err = None
-        cmd = ["yt-dlp", "--newline", "--no-mtime"]
-        if quality == "mp3":
-            cmd.extend(["-x", "--audio-format", "mp3"])
-        elif quality == "best":
-            cmd.extend(["-f", "bestvideo+bestaudio/best"])
+
+        ydl_opts = {
+            'outtmpl': f'{path}/%(title)s.%(ext)s',
+            'progress_hooks': [self.progress_hook],
+            'nocheckcertificate': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        if self.settings.get('use_proxy') and self.settings.get('proxy'):
+            ydl_opts['proxy'] = self.settings['proxy']
+
+        # Настройка формата
+        if q == "mp3":
+            ydl_opts['format'] = 'bestaudio/best'
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+        elif q == "best":
+            ydl_opts['format'] = 'bestvideo+bestaudio/best'
         else:
-            cmd.extend(["-f", f"bestvideo[height<={quality}]+bestaudio/best"])
-        cmd.extend(["-o", f"{path}/%(title)s.%(ext)s"])
-        if proxy: cmd.extend(["--proxy", proxy])
-        cmd.append(url)
+            ydl_opts['format'] = f'bestvideo[height<={q}]+bestaudio/best'
 
         try:
-            progress = 3.0
-            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            for line in self.process.stdout:
-                match = re.search(r'(\d+\.\d+)%', line)
-                if match:
-                    percent_done = float(match.group(1))
-                    if percent_done < 99:
-                        progress = max(progress, percent_done - 20.0)
-                        GLib.idle_add(self.progress_bar.set_fraction, progress / 100)
-            self.process.wait()
-            if self.process and self.process.returncode != 0: 
-                err = "Ошибка"
-            else:
-                GLib.idle_add(self.progress_bar.set_fraction, 1.0)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
         except Exception as e:
-            err = str(e)
+            if str(e) == "DOWNLOAD_CANCELLED_BY_USER":
+                err = "Загрузка отменена пользователем"
+            else:
+                err = str(e)
+            print(f"Status: {err}")
         finally:
-            success = (err is None and self.process is not None and self.process.returncode == 0)
-            self.history.append(
-                {"url": url, "quality": quality, "date": datetime.datetime.now().strftime("%d.%m.%Y %H:%M"),
-                 "error": err})
+            # Логируем только если это не была ручная отмена,
+            # или если вы хотите видеть отмены в истории — оставьте как есть
+            self.history.append({
+                "url": url,
+                "quality": q,
+                "date": datetime.datetime.now().strftime("%d.%m.%Y %H:%M"),
+                "error": err
+            })
             self.save_history()
-            self.process = None
-            GLib.idle_add(self.finalize, success, path)
+            GLib.idle_add(self.finalize, err is None, path)
+
+    def on_cancel_clicked(self, b):
+        """Явная установка флага остановки"""
+        self.stop_download = True
+        # Кнопка сразу вернется в состояние "Загрузить", не дожидаясь закрытия потока
+        self.btn_cancel.hide()
+        self.btn_download.show()
+        self.progress_bar.set_fraction(0.0)
 
     def finalize(self, success, path):
         self.btn_cancel.hide()
